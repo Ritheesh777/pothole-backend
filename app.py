@@ -153,16 +153,14 @@ def initialize_models():
         logger.error(f"Failed to initialize models: {e}")
         return False
 
+# Initialize models and create the WSGI app at import time
+_models_initialized = initialize_models()
+if not _models_initialized:
+    logger.warning("Some models failed to initialize. Continuing with limited functionality.")
+
+app = create_app()
+
 if __name__ == '__main__':
-    # Initialize models before starting the app
-    models_initialized = initialize_models()
-    
-    if not models_initialized:
-        logger.warning("Some models failed to initialize. The app may not work correctly.")
-    
-    # Create Flask app
-    app = create_app()
-    
     # Get configuration from environment variables
     debug_mode = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
     host = os.getenv('FLASK_HOST', '0.0.0.0')
