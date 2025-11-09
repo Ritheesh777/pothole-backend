@@ -1,9 +1,12 @@
 import os
+import json
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from psycopg2.pool import ThreadedConnectionPool
 import logging
 from contextlib import contextmanager
+from datetime import datetime, timedelta
+from collections import defaultdict
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -11,7 +14,18 @@ logger = logging.getLogger(__name__)
 class DatabaseManager:
     def __init__(self):
         self.connection_pool = None
-        self.init_connection_pool()
+        self.use_storage = os.getenv("USE_SIMPLE_DB", "1") == "1"
+        self.storage_file = os.getenv("SIMPLE_DB_FILE", "potholes_data.json")
+        self.surveys_file = os.getenv("SIMPLE_SURVEYS_FILE", "surveys_data.json")
+        self.potholes = []
+        self.surveys = []
+        self._next_id = 1
+
+        if self.use_storage:
+            logger.info("Using simple JSON storage for database operations.")
+            self._load_storage()
+        else:
+            self.init_connection_pool()
     
     def init_connection_pool(self):
         """Initialize connection pool"""
@@ -37,11 +51,157 @@ class DatabaseManager:
             
         except Exception as e:
             logger.error(f"Failed to initialize database connection pool: {e}")
-            raise
+            logger.warning("Falling back to simple JSON storage for database operations.")
+            self.use_storage = True
+            self._load_storage()
+
+    def _load_storage(self):
+        """Load pothole and survey data from JSON storage."""
+        try:
+            if os.path.exists(self.storage_file):
+                with open(self.storage_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.potholes = data.get("potholes", [])
+                    for pothole in self.potholes:
+                        if isinstance(pothole.get("detected_at"), str):
+                            try:
+                                pothole["detected_at"] = datetime.fromisoformat(pothole["detected_at"])
+                            except ValueError:
+                                pothole["detected_at"] = datetime.utcnow()
+                    if self.potholes:
+                        self._next_id = max(p.get("id", 0) for p in self.potholes) + 1
+            if os.path.exists(self.surveys_file):
+                with open(self.surveys_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.surveys = data.get("surveys", [])
+            if not self.surveys:
+                self._seed_surveys()
+                self._save_surveys()
+            if not self.potholes:
+                self._seed_sample_potholes()
+                self._save_storage()
+            logger.info(f"Loaded {len(self.potholes)} potholes from JSON storage.")
+        except Exception as e:
+            logger.error(f"Failed to load JSON storage: {e}")
+            self.potholes = []
+            self.surveys = []
+
+    def _save_storage(self):
+        """Persist pothole data to JSON storage."""
+        if not self.use_storage:
+            return
+        try:
+            serialised = []
+            for pothole in self.potholes:
+                serialised.append({
+                    **pothole,
+                    "detected_at": pothole.get("detected_at").isoformat() if isinstance(pothole.get("detected_at"), datetime) else pothole.get("detected_at")
+                })
+            with open(self.storage_file, "w", encoding="utf-8") as f:
+                json.dump({"potholes": serialised}, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save pothole storage: {e}")
+
+    def _save_surveys(self):
+        if not self.use_storage:
+            return
+        try:
+            with open(self.surveys_file, "w", encoding="utf-8") as f:
+                json.dump({"surveys": self.surveys}, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save survey storage: {e}")
+
+    def _seed_surveys(self):
+        self.surveys = [
+            {
+                "id": 1,
+                "name": "Main Street Survey",
+                "description": "Downtown area inspection",
+                "latitude": 12.2958,
+                "longitude": 76.6394,
+                "status": "active",
+                "start_time": datetime.utcnow().isoformat()
+            },
+            {
+                "id": 2,
+                "name": "Highway 275 Survey",
+                "description": "Highway condition assessment",
+                "latitude": 12.3047,
+                "longitude": 76.6412,
+                "status": "active",
+                "start_time": datetime.utcnow().isoformat()
+            },
+            {
+                "id": 3,
+                "name": "University Area Survey",
+                "description": "Campus vicinity inspection",
+                "latitude": 12.2856,
+                "longitude": 76.6298,
+                "status": "completed",
+                "start_time": datetime.utcnow().isoformat()
+            },
+        ]
     
+    def _seed_sample_potholes(self):
+        samples = [
+            {
+                "pothole_id": "PH_MAIN_STREET_001",
+                "survey_name": "Main Street Survey",
+                "latitude": 12.2958,
+                "longitude": 76.6394,
+                "confidence": 0.85,
+                "depth": 0.12,
+                "severity": "severe",
+                "area_description": "Near Main Street intersection",
+            },
+            {
+                "pothole_id": "PH_MAIN_STREET_002",
+                "survey_name": "Main Street Survey",
+                "latitude": 12.2965,
+                "longitude": 76.6400,
+                "confidence": 0.72,
+                "depth": 0.08,
+                "severity": "moderate",
+                "area_description": "Opposite the library",
+            },
+            {
+                "pothole_id": "PH_HIGHWAY_275_001",
+                "survey_name": "Highway 275 Survey",
+                "latitude": 12.3047,
+                "longitude": 76.6412,
+                "confidence": 0.91,
+                "depth": 0.15,
+                "severity": "severe",
+                "area_description": "Highway 275 northbound lane",
+            },
+            {
+                "pothole_id": "PH_UNIVERSITY_001",
+                "survey_name": "University Area Survey",
+                "latitude": 12.2856,
+                "longitude": 76.6298,
+                "confidence": 0.68,
+                "depth": 0.06,
+                "severity": "minor",
+                "area_description": "Near campus gate",
+            },
+        ]
+        now = datetime.utcnow()
+        for sample in samples:
+            record = {
+                "id": self._next_id,
+                "detected_at": now,
+                "status": "detected",
+                "priority": 3,
+                **sample,
+            }
+            self._next_id += 1
+            self.potholes.append(record)
+
     @contextmanager
     def get_connection(self):
         """Context manager for database connections"""
+        if self.use_storage:
+            raise RuntimeError("Database connections are not available in storage mode.")
         conn = None
         try:
             conn = self.connection_pool.getconn()
@@ -57,6 +217,8 @@ class DatabaseManager:
     
     def create_tables(self):
         """Create necessary tables with all required fields"""
+        if self.use_storage:
+            return
         try:
             with self.get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -233,6 +395,48 @@ class DatabaseManager:
     
     def insert_pothole(self, pothole_data):
         """Insert a new pothole record with all fields"""
+        if self.use_storage:
+            severity = pothole_data.get('severity')
+            confidence = pothole_data.get('confidence', 0)
+            depth = pothole_data.get('depth', 0) or 0
+            if not severity:
+                if confidence > 0.8 or depth > 0.15:
+                    severity = 'severe'
+                elif confidence > 0.6 or depth > 0.08:
+                    severity = 'moderate'
+                else:
+                    severity = 'minor'
+            bbox_area = None
+            if pothole_data.get('bbox_width') and pothole_data.get('bbox_height'):
+                bbox_area = pothole_data['bbox_width'] * pothole_data['bbox_height']
+
+            record = {
+                "id": self._next_id,
+                "pothole_id": pothole_data['pothole_id'],
+                "survey_name": pothole_data['survey_name'],
+                "latitude": pothole_data['latitude'],
+                "longitude": pothole_data['longitude'],
+                "confidence": confidence,
+                "depth": depth,
+                "severity": severity,
+                "bbox_x": pothole_data.get('bbox_x'),
+                "bbox_y": pothole_data.get('bbox_y'),
+                "bbox_width": pothole_data.get('bbox_width'),
+                "bbox_height": pothole_data.get('bbox_height'),
+                "bbox_area": bbox_area,
+                "image_url": pothole_data.get('image_url'),
+                "area_description": pothole_data.get('area_description'),
+                "detection_type": pothole_data.get('detection_type', 'capture'),
+                "device_info": pothole_data.get('device_info'),
+                "status": pothole_data.get('status', 'detected'),
+                "priority": pothole_data.get('priority', 3),
+                "detected_at": datetime.utcnow(),
+            }
+            self.potholes.append(record)
+            self._next_id += 1
+            self._save_storage()
+            return {"id": record["id"], "detected_at": record["detected_at"]}
+
         insert_sql = """
         INSERT INTO potholes 
         (pothole_id, survey_name, latitude, longitude, confidence, depth, severity,
@@ -290,6 +494,20 @@ class DatabaseManager:
     
     def get_all_potholes(self, limit=1000, survey_name=None):
         """Get all potholes with optional survey filter"""
+        if self.use_storage:
+            results = self.potholes
+            if survey_name:
+                results = [p for p in results if p.get("survey_name") == survey_name]
+            results = sorted(results, key=lambda x: x.get("detected_at", datetime.utcnow()), reverse=True)
+            limited = results[:limit]
+            serialised = []
+            for item in limited:
+                serialised.append({
+                    **item,
+                    "detected_at": item.get("detected_at").isoformat() if isinstance(item.get("detected_at"), datetime) else item.get("detected_at")
+                })
+            return serialised
+
         base_sql = """
         SELECT id, pothole_id, survey_name, latitude, longitude, confidence, depth, severity,
                bbox_x, bbox_y, bbox_width, bbox_height, image_url, area_description,
@@ -320,6 +538,59 @@ class DatabaseManager:
     
     def get_survey_statistics(self):
         """Get comprehensive survey statistics"""
+        if self.use_storage:
+            stats = defaultdict(lambda: {
+                "survey_name": None,
+                "total_potholes": 0,
+                "severe_count": 0,
+                "moderate_count": 0,
+                "minor_count": 0,
+                "avg_confidence": 0,
+                "avg_depth": 0,
+                "first_detection": None,
+                "last_detection": None,
+                "live_detections": 0,
+                "capture_detections": 0,
+            })
+            for pothole in self.potholes:
+                name = pothole.get("survey_name", "Unknown")
+                info = stats[name]
+                info["survey_name"] = name
+                info["total_potholes"] += 1
+                severity = pothole.get("severity")
+                if severity == "severe":
+                    info["severe_count"] += 1
+                elif severity == "moderate":
+                    info["moderate_count"] += 1
+                elif severity == "minor":
+                    info["minor_count"] += 1
+                info["avg_confidence"] += pothole.get("confidence", 0)
+                info["avg_depth"] += pothole.get("depth", 0) or 0
+                detected_at = pothole.get("detected_at")
+                if isinstance(detected_at, str):
+                    try:
+                        detected_at = datetime.fromisoformat(detected_at)
+                    except ValueError:
+                        detected_at = datetime.utcnow()
+                if info["first_detection"] is None or detected_at < info["first_detection"]:
+                    info["first_detection"] = detected_at
+                if info["last_detection"] is None or detected_at > info["last_detection"]:
+                    info["last_detection"] = detected_at
+                if pothole.get("detection_type") == "live":
+                    info["live_detections"] += 1
+                else:
+                    info["capture_detections"] += 1
+            results = []
+            for data in stats.values():
+                count = data["total_potholes"] or 1
+                data["avg_confidence"] = data["avg_confidence"] / count
+                data["avg_depth"] = data["avg_depth"] / count
+                data["first_detection"] = data["first_detection"].isoformat() if data["first_detection"] else None
+                data["last_detection"] = data["last_detection"].isoformat() if data["last_detection"] else None
+                results.append(data)
+            results.sort(key=lambda x: x["total_potholes"], reverse=True)
+            return results
+
         stats_sql = """
         SELECT 
             survey_name,
@@ -350,6 +621,25 @@ class DatabaseManager:
     
     def get_potholes_in_bounds(self, north, south, east, west, survey_name=None):
         """Get potholes within geographic bounds"""
+        if self.use_storage:
+            results = []
+            for pothole in self.potholes:
+                lat = pothole.get("latitude")
+                lng = pothole.get("longitude")
+                if lat is None or lng is None:
+                    continue
+                if not (south <= lat <= north and west <= lng <= east):
+                    continue
+                if survey_name and pothole.get("survey_name") != survey_name:
+                    continue
+                record = pothole.copy()
+                detected_at = record.get("detected_at")
+                if isinstance(detected_at, datetime):
+                    record["detected_at"] = detected_at.isoformat()
+                results.append(record)
+            results.sort(key=lambda x: x.get("detected_at"), reverse=True)
+            return results
+
         base_sql = """
         SELECT id, pothole_id, survey_name, latitude, longitude, confidence, depth, severity,
                bbox_x, bbox_y, bbox_width, bbox_height, image_url, area_description,
@@ -379,6 +669,16 @@ class DatabaseManager:
     
     def get_pothole_by_id(self, pothole_id):
         """Get a specific pothole by its unique ID"""
+        if self.use_storage:
+            for pothole in self.potholes:
+                if pothole.get("pothole_id") == pothole_id:
+                    record = pothole.copy()
+                    detected_at = record.get("detected_at")
+                    if isinstance(detected_at, datetime):
+                        record["detected_at"] = detected_at.isoformat()
+                    return record
+            return None
+
         select_sql = """
         SELECT * FROM potholes WHERE pothole_id = %s;
         """
@@ -395,6 +695,18 @@ class DatabaseManager:
     
     def update_pothole_status(self, pothole_id, status, notes=None):
         """Update pothole status and add notes"""
+        if self.use_storage:
+            for pothole in self.potholes:
+                if pothole.get("pothole_id") == pothole_id:
+                    pothole["status"] = status
+                    if notes:
+                        pothole["verification_notes"] = notes
+                    pothole["updated_at"] = datetime.utcnow().isoformat()
+                    self._save_storage()
+                    return {"id": pothole.get("id"), "status": status}
+            logger.warning(f"Pothole {pothole_id} not found for status update")
+            return None
+
         update_sql = """
         UPDATE potholes 
         SET status = %s, verification_notes = COALESCE(%s, verification_notes), updated_at = CURRENT_TIMESTAMP
@@ -420,6 +732,24 @@ class DatabaseManager:
     
     def create_survey(self, survey_data):
         """Create a new survey"""
+        if self.use_storage:
+            survey = {
+                "id": max([s.get("id", 0) for s in self.surveys] + [0]) + 1,
+                "name": survey_data['name'],
+                "description": survey_data.get('description'),
+                "latitude": survey_data.get('latitude'),
+                "longitude": survey_data.get('longitude'),
+                "surveyor_name": survey_data.get('surveyor_name'),
+                "survey_type": survey_data.get('survey_type', 'routine'),
+                "notes": survey_data.get('notes'),
+                "status": "active",
+                "start_time": datetime.utcnow().isoformat()
+            }
+            self.surveys.append(survey)
+            self._save_surveys()
+            logger.info(f"Survey created: {survey['name']}")
+            return {"id": survey["id"], "name": survey["name"], "start_time": survey["start_time"]}
+
         insert_sql = """
         INSERT INTO surveys (name, description, start_location, surveyor_name, survey_type, notes)
         VALUES (%s, %s, ST_SetSRID(ST_MakePoint(%s, %s), 4326), %s, %s, %s)
@@ -448,6 +778,22 @@ class DatabaseManager:
     
     def get_all_surveys(self):
         """Get all surveys with their statistics"""
+        if self.use_storage:
+            stats_map = self.get_survey_statistics()
+            stats_by_name = {item["survey_name"]: item for item in stats_map}
+            surveys = []
+            for survey in self.surveys:
+                info = stats_by_name.get(survey["name"], {})
+                surveys.append({
+                    **survey,
+                    "total_potholes": info.get("total_potholes", 0),
+                    "severe_count": info.get("severe_count", 0),
+                    "moderate_count": info.get("moderate_count", 0),
+                    "minor_count": info.get("minor_count", 0),
+                })
+            surveys.sort(key=lambda x: x.get("start_time"), reverse=True)
+            return surveys
+
         surveys_sql = """
         SELECT s.*, 
                COALESCE(p.total_potholes, 0) as total_potholes,
@@ -479,6 +825,44 @@ class DatabaseManager:
     
     def get_pothole_density(self, grid_size=0.01, survey_name=None):
         """Get pothole density data for heatmap"""
+        if self.use_storage:
+            density = defaultdict(lambda: {
+                "lat_grid": None,
+                "lng_grid": None,
+                "count": 0,
+                "avg_confidence": 0,
+                "surveys": set(),
+            })
+            for pothole in self.potholes:
+                if survey_name and pothole.get("survey_name") != survey_name:
+                    continue
+                lat = pothole.get("latitude")
+                lng = pothole.get("longitude")
+                if lat is None or lng is None:
+                    continue
+                lat_grid = round(lat / grid_size) * grid_size
+                lng_grid = round(lng / grid_size) * grid_size
+                key = (lat_grid, lng_grid)
+                info = density[key]
+                info["lat_grid"] = lat_grid
+                info["lng_grid"] = lng_grid
+                info["count"] += 1
+                info["avg_confidence"] += pothole.get("confidence", 0)
+                info["surveys"].add(pothole.get("survey_name", "Unknown"))
+            results = []
+            for info in density.values():
+                if info["count"] == 0:
+                    continue
+                results.append({
+                    "lat_grid": info["lat_grid"],
+                    "lng_grid": info["lng_grid"],
+                    "count": info["count"],
+                    "avg_confidence": info["avg_confidence"] / info["count"],
+                    "surveys": ", ".join(sorted(info["surveys"]))
+                })
+            results.sort(key=lambda x: x["count"], reverse=True)
+            return results
+
         base_sql = """
         SELECT 
             ROUND(latitude / %s) * %s as lat_grid,
@@ -508,6 +892,68 @@ class DatabaseManager:
     
     def get_detailed_analytics(self, days=30, survey_name=None):
         """Get detailed analytics for the dashboard"""
+        if self.use_storage:
+            cutoff = datetime.utcnow() - timedelta(days=days)
+            filtered = []
+            for pothole in self.potholes:
+                detected_at = pothole.get("detected_at")
+                if isinstance(detected_at, str):
+                    try:
+                        detected_at = datetime.fromisoformat(detected_at)
+                    except ValueError:
+                        detected_at = datetime.utcnow()
+                if detected_at < cutoff:
+                    continue
+                if survey_name and pothole.get("survey_name") != survey_name:
+                    continue
+                filtered.append((pothole, detected_at))
+
+            daily = defaultdict(lambda: {"detection_date": None, "daily_count": 0, "daily_avg_confidence": 0})
+            hourly = defaultdict(lambda: {"hour": None, "hourly_count": 0})
+            severity_stats = defaultdict(lambda: {"severity": None, "count": 0, "avg_confidence": 0, "avg_depth": 0})
+
+            for pothole, detected_at in filtered:
+                date_key = detected_at.date().isoformat()
+                info = daily[date_key]
+                info["detection_date"] = date_key
+                info["daily_count"] += 1
+                info["daily_avg_confidence"] += pothole.get("confidence", 0)
+
+                hour = detected_at.hour
+                hinfo = hourly[hour]
+                hinfo["hour"] = hour
+                hinfo["hourly_count"] += 1
+
+                severity = pothole.get("severity", "unknown")
+                sinfo = severity_stats[severity]
+                sinfo["severity"] = severity
+                sinfo["count"] += 1
+                sinfo["avg_confidence"] += pothole.get("confidence", 0)
+                sinfo["avg_depth"] += pothole.get("depth", 0) or 0
+
+            daily_data = []
+            for item in daily.values():
+                count = item["daily_count"] or 1
+                item["daily_avg_confidence"] = item["daily_avg_confidence"] / count
+                daily_data.append(item)
+            daily_data.sort(key=lambda x: x["detection_date"], reverse=True)
+
+            hourly_data = list(hourly.values())
+            hourly_data.sort(key=lambda x: x["hour"])
+
+            severity_data = []
+            for item in severity_stats.values():
+                count = item["count"] or 1
+                item["avg_confidence"] = item["avg_confidence"] / count
+                item["avg_depth"] = item["avg_depth"] / count
+                severity_data.append(item)
+
+            return {
+                "daily": daily_data,
+                "hourly": hourly_data,
+                "severity": severity_data,
+            }
+
         base_where = f"WHERE detected_at >= CURRENT_TIMESTAMP - INTERVAL '{days} days'"
         if survey_name:
             base_where += f" AND survey_name = '{survey_name}'"
@@ -576,6 +1022,8 @@ class DatabaseManager:
     
     def close_connections(self):
         """Close all connections in the pool"""
+        if self.use_storage:
+            return
         if self.connection_pool:
             self.connection_pool.closeall()
             logger.info("Database connections closed")
