@@ -123,6 +123,11 @@ def create_app():
         images_dir = os.path.join(os.getcwd(), 'images')
         return send_from_directory(images_dir, filename)
     
+    @app.route('/favicon.ico')
+    def favicon():
+        # No favicon asset yet; respond with empty 204 to suppress 404 logs
+        return ('', 204)
+    
     # Request logging middleware
     @app.before_request
     def log_request_info():
