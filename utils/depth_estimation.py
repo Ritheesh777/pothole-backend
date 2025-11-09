@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import logging
+import os
 import random 
 
 # NOTE: You MUST install the 'timm' library for MiDaS to load correctly: pip install timm
@@ -11,30 +12,33 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- MiDaS Integration Setup ---
+USE_MIDAS = os.getenv("ENABLE_DEPTH_MODEL", "0") == "1"
 midas = None
 transform = None
 midas_device = 'cpu'
 
-try:
-    logger.info("Attempting to load MiDaS model from PyTorch Hub...")
-    # Attempt to load actual MiDaS small model
-    # Requires 'timm' library and internet access for the first run
-    midas = torch.hub.load('intel-isl/MiDaS', 'MiDaS_small', pretrained=True)
-    midas_device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-    midas.to(midas_device)
-    midas.eval()
-    
-    midas_transforms = torch.hub.load('intel-isl/MiDaS', 'transforms')
-    # NOTE: The transforms object is complex, but MiDaS uses specific transforms
-    if hasattr(midas_transforms, 'small_transform'):
-        transform = midas_transforms.small_transform
-    else:
-        transform = None
+if USE_MIDAS:
+    try:
+        logger.info("ENABLE_DEPTH_MODEL=1, attempting to load MiDaS model from PyTorch Hub...")
+        midas = torch.hub.load('intel-isl/MiDaS', 'MiDaS_small', pretrained=True)
+        midas_device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        midas.to(midas_device)
+        midas.eval()
         
-    logger.info(f"MiDaS model loaded successfully on {midas_device}.")
-    
-except Exception as e:
-    logger.warning(f"MiDaS model loading failed. Using placeholder depth. Error: {e}")
+        midas_transforms = torch.hub.load('intel-isl/MiDaS', 'transforms')
+        if hasattr(midas_transforms, 'small_transform'):
+            transform = midas_transforms.small_transform
+        else:
+            transform = None
+            
+        logger.info(f"MiDaS model loaded successfully on {midas_device}.")
+        
+    except Exception as e:
+        midas = None
+        transform = None
+        logger.warning(f"MiDaS model loading failed. Falling back to placeholder depth. Error: {e}")
+else:
+    logger.info("Depth model disabled (ENABLE_DEPTH_MODEL != 1). Using placeholder depth estimation.")
 
 class DepthEstimator:
     def __init__(self):
